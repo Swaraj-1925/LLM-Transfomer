@@ -1,0 +1,180 @@
+import math
+from typing_extensions import NoExtraItems
+
+import torch
+import torch.nn as nn
+
+
+class InputEmbeddings(nn.Module):
+    def __init__(self, d_model:int, vocab_size:int) -> None:
+        super().__init__()
+        self.d_model = d_model
+        self.vocab_size = vocab_size
+        self.embedding = nn.Embedding(self.vocab_size,self.d_model)
+
+    def forward(self,x):
+        ret = self.embedding(x) * math.sqrt(self.d_model)
+
+class PostionalEncoding(nn.Module):
+    def __init__(self, d_model:int, seq_len:int , dropout:float) -> None:
+        super().__init__()
+
+        self.d_model = d_model
+        self.seq_len = seq_len
+        self.dropout = nn.Dropout(dropout)
+
+        # postional encoding of size d_model rows and seq
+        # Each row represents a position in the sentence, Each column represents a dimension of the embedding
+        # If you used (d_model, seq_len), you would have to transpose your data every time you wanted to add the
+        # encoding to your word embeddings. Keeping it as (seq_len, d_model) allows you to simply do: embeddings + pos_encoding.
+        self.pos_encoding = torch.zeros(seq_len,d_model)
+
+        # create a vector of shape seq_len filled with 0
+        pos = torch.arange(0,seq_len,dtype=torch.float)
+        # convert vector into vector of vector like this [[0],[0],[0]] i.e flat row into a column:
+        # represents for each word value
+        # add a new dimesion at index 1 with value 1
+        pos = pos.unsqueeze(1)
+
+        # as we are going to fill odd and even values sepratly we only need d_model/2 div_term
+        # data doesnt change just for even places we take sin and for odd placed we take cos
+        div_term = torch.exp(
+                torch.arange(0,d_model,2).float() * (-math.log(10000.0)/d_model)
+                )
+
+        self.pos_encoding[:,0::2] = torch.sin(pos * div_term)
+        self.pos_encoding[:,1::2] = torch.cos(pos * div_term)
+
+        # [rows (seq_len), column(d_model)] -> [batch_size(1),rows (seq_len), column(d_model)]
+        # model porcess data in batches
+        # add a new dimesion at index 0 with value 1
+        pos_encoding = self.pos_encoding.unsqueeze(0)
+
+        # save data in file
+        self.register_buffer("PostionalEncoding", self.pos_encoding)
+
+    def forward(self,x):
+        # slicing opration
+        # 1st ':' selects all elements along the first dimension
+        # :x.shape[1] select elements along the second axis (columns) from the beginning (default start index 0)
+        #   up to (but not including) the index specified by the length of the second dimension of the array x itself
+        # 3rd ':' selects all elements along the 3rd dimension
+        x =  x + (self.pos_encoding[:, :x.shape[1], :]).requires_grad_(False)
+        return self.dropout(x)
+
+class LayerNormalizatin(nn.Module):
+    def __init__(self, esp: float = 10**-6) -> None:
+        super().__init__()
+
+        self.esp = esp
+        self.alph = nn.Parameter(torch.ones(1)) # Multiplied
+        self.bais = nn.Parameter(torch.ones(0)) # Added
+
+    def forward(self,x):
+        mean = x.mean(dim = -1,keepdim=True)
+        std = x.std(dim = -1,keepdim=True)
+        return self.alph * ( x - mean) / (std + self.esp) + self.bais
+
+class FeedForwardBlock(nn.Module):
+    def __init__(self, d_model:int, d_ff:int, dropout:float ) -> None:
+        super().__init__()
+
+        self.linear_1 = nn.Linear(d_model,d_ff) # w_1 and b_1
+        self.dropout = nn.Dropout(dropout)
+
+        self.linear_2 = nn.Linear(d_model,d_model) # w_2 and b_2
+
+    def forward(self,x):
+        # (batch , seq_len, d_model) -> (batch , seq_len, d_ff) ->  (batch , seq_len, d_model)
+        x = self.linear_1(x)
+        x = torch.relu(x)
+        x = self.dropout(x)
+        x = self.linear_2(x)
+
+        return x
+
+
+class MultiHeadAttentionBlock(nn.Module):
+
+    def __init__(self, d_model:int, h:int, dropout:float ) -> None:
+        super().__init__()
+        self.d_model = d_model
+        self.h = h # number of head
+
+        # d_model contain embding size , each head will try to undesratnd word with and diffrent meanng
+        # for a word 1 head learns it as a nounce other word lears it as verb
+        # each word will get all sequnce and some amount of embedding whihc tell realtion with other words
+        assert d_model % h == 0, "d_model not divisble by h"
+
+        self.d_k = d_model // h # spliting the input so each head can process some number of inputs
+
+        self.w_q = nn.Linear(d_model,d_model)
+        self.w_k = nn.Linear(d_model,d_model)
+        self.w_v = nn.Linear(d_model,d_model)
+
+        self.w_o = nn.Linear(d_model,d_model)
+
+        self.dropout = nn.Dropout(dropout)
+
+    @staticmethod
+    def attention(self, qurey, key, value, mask, dropout: nn.Dropout):
+        d_k = qurey.shap[-1]
+
+        # @ = matrics multiplication in pytroch
+        # transpose(-2,-1) = (batch , h,seq_len, d_model) ->  (batch , h, seq_len, seq_len)
+        attention_score = (qurey @ key.torch.transpose(-2,-1)) / math.sqrt(d_k)
+        if mask is not None:
+            # replace anything whihc is 0 to -1e9
+            # as softmax of 0 is 0.5
+            attention_score.masked_fill_(mask == 0, -1e9)
+        # will repalce of -1e9 is 0
+        attention_score = attention_score.softmax(dim = -1)
+
+        if dropout is not None:
+            attention_score = dropout(attention_score)
+
+        # attention_score is used for visulization
+        return (attention_score @ value) ,attention_score
+
+
+    def forward(self,q,k,v,mask):
+        # (batch , seq_len, d_model) ->  (batch , seq_len, d_model)
+        qurey = self.w_q(q) # is mathematically Q=q⋅W^Q.
+        key = self.w_k(k)
+        value = self.w_v(v)
+
+        # (batch , seq_len, d_model[512]) ->  (batch , seq_len, d_model, h, d_k)
+        # Don't see a single line of 512 features; see 8 groups of 64 features. [Batch, Seq_Len, 8, 64]
+        qurey = qurey.view(qurey.shape[0], qurey.shape[1], self.h, self.d_k)
+        # (batch, seq_len, h, d_k) ->  (batch , h, seq_len, d_k)
+        # each head h in batch will process seq_len*d_k embedding
+        qurey = qurey.transpose(1,2)
+
+        key = key.view(key.shape[0], key.shape[1], self.h, self.d_k).transpose(1,2)
+        value = value.view(value.shape[0], value.shape[1], self.h, self.d_k).transpose(1,2)
+
+        x, self.attention_score = MultiHeadAttentionBlock.attention(qurey,key,value,mask,self.dropout)
+
+        # (batch , h, seq_len, d_k) -> (batch, seq_len, d_model, h, d_k) -> (batch , seq_len, d_model)
+        # 1. Swap Seq_Len and Heads back
+        x = x.transpose(1, 2) # [Batch, Seq_Len, 8, 64]
+        # 2. Flatten the last two dimensions (8 * 64 = 512)
+        x = x.view(x.shape[0], -1, self.h * self.d_k) # [Batch, Seq_Len, 512]
+
+        return self.w_o(x)
+
+# Skip connection
+class ResidualConnection(nn.Module):
+    def __init__(self, dropout:float ) -> None:
+        super().__init__()
+        self.dropout = nn.Dropout(dropout)
+        self.norm = LayerNormalizatin()
+
+    def forward(self, x, sublayer):
+        #sublayer is MultiHeadAttentionBlock or FeedForwardBlock
+        y = self.norm(x)
+        y = sublayer(y)
+        y = self.dropout(y)
+
+        # add and norm
+        return x + y
