@@ -178,3 +178,96 @@ class ResidualConnection(nn.Module):
 
         # add and norm
         return x + y
+
+# === Encoder ===
+class EncoderBlock(nn.Module):
+
+    def __init__(self, self_attention_block: MultiHeadAttentionBlock, feed_forward: FeedForwardBlock, dropout: float ) -> None:
+        super().__init__()
+
+        self.self_attention_block = self_attention_block
+        self.feed_forward = feed_forward
+        self.dropout = nn.Dropout(dropout)
+        self.residual_connections = nn.ModuleList([
+                ResidualConnection(dropout) for _ in range(2)
+            ])
+
+    def forward(self,x, src_mask):
+        # src_mask we dont want the padding words to ittracat with accutle words
+
+        # calcaulte muli head attention then add and norm the input
+        x = self.residual_connections(x,
+                                      lambda x: self.self_attention_block(x,x,x,src_mask)
+                                      )
+
+        # feed_forward
+        x = self.residual_connections(x, lambda x: self.feed_forward)
+        return x;
+# Encoder is made of n_x encoder block
+class Encoder(nn.Module):
+
+    def __init__(self, layers: nn.ModuleList):
+        super().__init__()
+
+        self.layers = layers
+        self.norm = LayerNormalizatin()
+
+    def forward(self, x, mask):
+        for layer in self.layers:
+            x = layer(x,mask)
+        return self.norm(x)
+
+# === Decoder ===
+
+class Decoder(nn.Module):
+
+    def __init__(self, self_attention_block: MultiHeadAttentionBlock, cross_attention_block: MultiHeadAttentionBlock,feed_forward: FeedForwardBlock, dropout: float ) -> None:
+        super().__init__()
+
+        self.self_attention_block = self_attention_block
+        self.cross_attention_block = cross_attention_block
+
+        self.feed_forward = feed_forward
+        self.dropout = nn.Dropout(dropout)
+        self.residual_connections = nn.ModuleList([
+                ResidualConnection(dropout) for _ in range(2)
+            ])
+
+    def forward(self, x, encoder_output, src_mask, tgt_mask):
+
+        x = self.residual_connections(x, lambda x: self.self_attention_block(x,x,x,tgt_mask))
+        x = self.residual_connections(x, lambda x: self.cross_attention_block(x, encoder_output,encoder_output,src_mask))
+
+        x = self.residual_connections(x, lambda x: self.feed_forward)
+
+        return x
+
+
+
+# Decoder is made of n_x Decoder block
+class Dcoder(nn.Module):
+
+    def __init__(self, layers: nn.ModuleList):
+        super().__init__()
+
+        self.layers = layers
+        self.norm = LayerNormalizatin()
+
+    def forward(self, x, encoder_output, src_mask, tgt_mask):
+        for layer in self.layers:
+            x = layer(x,encoder_output,src_mask,tgt_mask)
+        return self.norm(x)
+
+# === Linear layer ===
+
+class ProjectionLayer(nn.Module):
+
+    def __init__(self, d_model:int, vocab_size:int ):
+        super().__init__()
+        self.proj = nn.Linear(d_model,vocab_size)
+
+    def forward(self, x, encoder_output, src_mask, tgt_mask):
+        # (batch, seq_len, d_model) -> (batch, seq_len, vocab_size)
+        x = torch.log_softmax(self.proj(x), dim= -1)
+
+        return x
