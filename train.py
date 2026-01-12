@@ -9,7 +9,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 from dataset import BilingualDataset, causal_mask
 from config import get_weights_file_path, get_config
-from model import build_transfer
+from model import build_transformer
 
 from tqdm import tqdm
 
@@ -137,7 +137,7 @@ def get_ds(config):
     return train_loader, val_loader, tokenizer_src, tokenizer_tgt
 
 def get_model(config, vocab_src_len, vocab_tgt_len):
-    model = build_transfer(vocab_src_len,vocab_tgt_len,config['seq_len'],config['seq_len'],config['d_model'])
+    model = build_transformer(vocab_src_len,vocab_tgt_len,config['seq_len'],config['seq_len'],config['d_model'])
     return model
 
 def train_model(config):
@@ -195,7 +195,7 @@ def train_model(config):
             optimizer.zero_grad(set_to_none=True)
 
             global_step += 1
-            run_vallidation(model, val_dataloader, tokenizer_src, tokenizer_tgt, config['seq_len'], device, lambda msg: batch_ittr.write(msg), global_step, writer)
+        run_vallidation(model, val_dataloader, tokenizer_src, tokenizer_tgt, config['seq_len'], device, lambda msg: batch_ittr.write(msg), global_step, writer)
 
         model_filename = get_weights_file_path(config, f'{epoch:02d}')
         torch.save({
