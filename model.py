@@ -12,7 +12,7 @@ class InputEmbeddings(nn.Module):
         self.embedding = nn.Embedding(self.vocab_size,self.d_model)
 
     def forward(self,x):
-        ret = self.embedding(x) * math.sqrt(self.d_model)
+        return self.embedding(x) * math.sqrt(self.d_model)
 
 class PostionalEncoding(nn.Module):
     def __init__(self, d_model:int, seq_len:int , dropout:float) -> None:
@@ -47,7 +47,7 @@ class PostionalEncoding(nn.Module):
         # [rows (seq_len), column(d_model)] -> [batch_size(1),rows (seq_len), column(d_model)]
         # model porcess data in batches
         # add a new dimesion at index 0 with value 1
-        pos_encoding = self.pos_encoding.unsqueeze(0)
+        self.pos_encoding = self.pos_encoding.unsqueeze(0)
 
         # save data in file
         self.register_buffer("PostionalEncoding", self.pos_encoding)
@@ -58,7 +58,7 @@ class PostionalEncoding(nn.Module):
         # :x.shape[1] select elements along the second axis (columns) from the beginning (default start index 0)
         #   up to (but not including) the index specified by the length of the second dimension of the array x itself
         # 3rd ':' selects all elements along the 3rd dimension
-        x =  x + (self.pos_encoding[:, :x.shape[1], :]).requires_grad_(False)
+        x =  x + (self.pos_encoding[:, :x.shape[1], :]).to(x.device).requires_grad_(False)
         return self.dropout(x)
 
 class LayerNormalizatin(nn.Module):
@@ -67,7 +67,7 @@ class LayerNormalizatin(nn.Module):
 
         self.esp = esp
         self.alph = nn.Parameter(torch.ones(1)) # Multiplied
-        self.bais = nn.Parameter(torch.ones(0)) # Added
+        self.bais = nn.Parameter(torch.zeros(1)) # Added
 
     def forward(self,x):
         mean = x.mean(dim = -1,keepdim=True)
@@ -81,7 +81,7 @@ class FeedForwardBlock(nn.Module):
         self.linear_1 = nn.Linear(d_model,d_ff) # w_1 and b_1
         self.dropout = nn.Dropout(dropout)
 
-        self.linear_2 = nn.Linear(d_model,d_model) # w_2 and b_2
+        self.linear_2 = nn.Linear(d_ff,d_model) # w_2 and b_2
 
     def forward(self,x):
         # (batch , seq_len, d_model) -> (batch , seq_len, d_ff) ->  (batch , seq_len, d_model)
@@ -116,12 +116,12 @@ class MultiHeadAttentionBlock(nn.Module):
         self.dropout = nn.Dropout(dropout)
 
     @staticmethod
-    def attention(self, qurey, key, value, mask, dropout: nn.Dropout):
-        d_k = qurey.shap[-1]
+    def attention(query, key, value, mask, dropout: nn.Dropout):
+        d_k = query.shape[-1]
 
         # @ = matrics multiplication in pytroch
         # transpose(-2,-1) = (batch , h,seq_len, d_model) ->  (batch , h, seq_len, seq_len)
-        attention_score = (qurey @ key.torch.transpose(-2,-1)) / math.sqrt(d_k)
+        attention_score = (query @ key.transpose(-2,-1)) / math.sqrt(d_k)
         if mask is not None:
             # replace anything whihc is 0 to -1e9
             # as softmax of 0 is 0.5
@@ -158,7 +158,7 @@ class MultiHeadAttentionBlock(nn.Module):
         # 1. Swap Seq_Len and Heads back
         x = x.transpose(1, 2) # [Batch, Seq_Len, 8, 64]
         # 2. Flatten the last two dimensions (8 * 64 = 512)
-        x = x.view(x.shape[0], -1, self.h * self.d_k) # [Batch, Seq_Len, 512]
+        x = x.contiguous().view(x.shape[0], -1, self.h * self.d_k) # [Batch, Seq_Len, 512]
 
         return self.w_o(x)
 
@@ -195,12 +195,12 @@ class EncoderBlock(nn.Module):
         # src_mask we dont want the padding words to ittracat with accutle words
 
         # calcaulte muli head attention then add and norm the input
-        x = self.residual_connections(x,
+        x = self.residual_connections[0](x,
                                       lambda x: self.self_attention_block(x,x,x,src_mask)
                                       )
 
         # feed_forward
-        x = self.residual_connections(x, lambda x: self.feed_forward)
+        x = self.residual_connections[1](x, self.feed_forward)
         return x;
 # Encoder is made of n_x encoder block
 class Encoder(nn.Module):
@@ -208,7 +208,7 @@ class Encoder(nn.Module):
     def __init__(self, layers: nn.ModuleList):
         super().__init__()
 
-        self.layers = layers
+        self.layers = nn.ModuleList(layers)
         self.norm = LayerNormalizatin()
 
     def forward(self, x, mask):
@@ -229,15 +229,15 @@ class DecoderBlock(nn.Module):
         self.feed_forward = feed_forward
         self.dropout = nn.Dropout(dropout)
         self.residual_connections = nn.ModuleList([
-                ResidualConnection(dropout) for _ in range(2)
+                ResidualConnection(dropout) for _ in range(3)
             ])
 
     def forward(self, x, encoder_output, src_mask, tgt_mask):
 
-        x = self.residual_connections(x, lambda x: self.self_attention_block(x,x,x,tgt_mask))
-        x = self.residual_connections(x, lambda x: self.cross_attention_block(x, encoder_output,encoder_output,src_mask))
+        x = self.residual_connections[0](x, lambda x: self.self_attention_block(x,x,x,tgt_mask))
+        x = self.residual_connections[1](x, lambda x: self.cross_attention_block(x, encoder_output,encoder_output,src_mask))
 
-        x = self.residual_connections(x, lambda x: self.feed_forward)
+        x = self.residual_connections[2](x, self.feed_forward)
 
         return x
 
@@ -249,7 +249,7 @@ class Decoder(nn.Module):
     def __init__(self, layers: nn.ModuleList):
         super().__init__()
 
-        self.layers = layers
+        self.layers = nn.ModuleList(layers)
         self.norm = LayerNormalizatin()
 
     def forward(self, x, encoder_output, src_mask, tgt_mask):
@@ -265,7 +265,7 @@ class ProjectionLayer(nn.Module):
         super().__init__()
         self.proj = nn.Linear(d_model,vocab_size)
 
-    def forward(self, x, encoder_output, src_mask, tgt_mask):
+    def forward(self, x):
         # (batch, seq_len, d_model) -> (batch, seq_len, vocab_size)
         x = torch.log_softmax(self.proj(x), dim= -1)
 
@@ -297,7 +297,7 @@ class Transformer(nn.Module):
         return self.projection_layer(x)
 
 # === Build transfomer
-def build_transfer(src_vocab_size: int, tgt_vocab_size: int, src_seq_len: int, tgt_seq_len: int, d_model: int, N: int, h: int = 8, dropout: float = 0.1, d_ff: int = 2048):
+def build_transfer(src_vocab_size: int, tgt_vocab_size: int, src_seq_len: int, tgt_seq_len: int, d_model: int, N: int = 6, h: int = 8, dropout: float = 0.1, d_ff: int = 2048):
     # create the embedding
     src_emd = InputEmbeddings(d_model,src_vocab_size)
     tgt_emd = InputEmbeddings(d_model,tgt_vocab_size)
